@@ -74,7 +74,17 @@ jobs:
           SHA-256: \`${KATERGON_SHA256}\`
           EOF
           if gh release view "$KATERGON_TAG" >/dev/null 2>&1; then
-            gh release upload "$KATERGON_TAG" "$KATERGON_ZIP" "$KATERGON_SIDECAR" --clobber
+            current=$(mktemp)
+            gh release view "$KATERGON_TAG" --json assets > "$current"
+            digests=$(CURRENT="$current" ZIP_NAME="$(basename "$KATERGON_ZIP")" \
+              SIDECAR_NAME="$(basename "$KATERGON_SIDECAR")" node -e \
+              "const { readFileSync } = require('node:fs'); const assets = JSON.parse(readFileSync(process.env.CURRENT, 'utf8')).assets; const digest = name => assets.find(asset => asset.name === name)?.digest ?? ''; process.stdout.write(digest(process.env.ZIP_NAME) + '|' + digest(process.env.SIDECAR_NAME));")
+            rm -f "$current"
+            IFS='|' read -r published_zip published_sidecar <<<"$digests"
+            sidecar_sha=$(sha256sum "$KATERGON_SIDECAR" | awk '{ print $1 }')
+            test "$published_zip" = "sha256:${KATERGON_SHA256}"
+            test "$published_sidecar" = "sha256:${sidecar_sha}"
+            printf 'Release %s is already published with the identical immutable assets.\n' "$KATERGON_TAG"
           else
             gh release create "$KATERGON_TAG" "$KATERGON_ZIP" "$KATERGON_SIDECAR" \
               --title "Katergon CLI ${KATERGON_VERSION}" --notes-file "$notes"
