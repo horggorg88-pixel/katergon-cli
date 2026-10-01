@@ -1,0 +1,98 @@
+name: Publish verified Katergon CLI release
+
+on:
+  push:
+    branches:
+      - 'incoming/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: katergon-public-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'horggorg88-pixel/katergon-cli'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Validate intake manifest and files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { appendFileSync, readFileSync, statSync } = require('node:fs');
+          const manifest = JSON.parse(readFileSync('incoming/manifest.json', 'utf8'));
+          const keys = Object.keys(manifest).sort();
+          const expectedKeys = [
+            'schemaVersion', 'sha256', 'sourceCommit', 'sourceRepository',
+            'sourceRunId', 'tag', 'version', 'zip'
+          ].sort();
+          if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)) throw new Error('Unexpected manifest fields');
+          if (manifest.schemaVersion !== 'katergon.public-release/v1') throw new Error('Unsupported manifest schema');
+          if (manifest.sourceRepository !== 'horggorg88-pixel/lbs-work-alpha') throw new Error('Untrusted source repository');
+          if (!/^[a-f0-9]{40}$/.test(manifest.sourceCommit)) throw new Error('Invalid source commit');
+          if (!/^\d+$/.test(String(manifest.sourceRunId))) throw new Error('Invalid source run ID');
+          if (!/^\d+\.\d+\.\d+$/.test(manifest.version)) throw new Error('Invalid version');
+          if (manifest.tag !== `v${manifest.version}`) throw new Error('Tag/version mismatch');
+          const expectedZip = `Katergon-CLI-${manifest.version}-win-x64.zip`;
+          if (manifest.zip !== expectedZip) throw new Error('Unexpected archive name');
+          if (!/^[a-f0-9]{64}$/.test(manifest.sha256)) throw new Error('Invalid SHA-256');
+          const zipPath = `incoming/${manifest.zip}`;
+          const sidecarPath = `${zipPath}.sha256`;
+          if (statSync(zipPath).size < 1_000_000 || statSync(zipPath).size > 100_000_000) {
+            throw new Error('Archive size outside the distribution boundary');
+          }
+          const actual = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
+          if (actual !== manifest.sha256) throw new Error('Archive SHA-256 mismatch');
+          const sidecar = readFileSync(sidecarPath, 'utf8').trim();
+          if (sidecar !== `${actual}  ${manifest.zip}`) throw new Error('Sidecar mismatch');
+          appendFileSync(process.env.GITHUB_ENV,
+            `KATERGON_TAG=${manifest.tag}\nKATERGON_VERSION=${manifest.version}\n` +
+            `KATERGON_ZIP=${zipPath}\nKATERGON_SIDECAR=${sidecarPath}\n` +
+            `KATERGON_SHA256=${actual}\n`);
+          NODE
+
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          notes=$(mktemp)
+          cat >"$notes" <<EOF
+          Portable Katergon CLI ${KATERGON_VERSION} for Windows x64.
+
+          Verify SHA-256, extract the archive and run \`Install.cmd\`.
+          Git, npm, Node.js and a source checkout are not required.
+
+          SHA-256: \`${KATERGON_SHA256}\`
+          EOF
+          if gh release view "$KATERGON_TAG" >/dev/null 2>&1; then
+            gh release upload "$KATERGON_TAG" "$KATERGON_ZIP" "$KATERGON_SIDECAR" --clobber
+          else
+            gh release create "$KATERGON_TAG" "$KATERGON_ZIP" "$KATERGON_SIDECAR" \
+              --title "Katergon CLI ${KATERGON_VERSION}" --notes-file "$notes"
+          fi
+
+      - name: Verify published archive digest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          digest=$(gh release view "$KATERGON_TAG" --json assets \
+            --jq ".assets[] | select(.name == \"$(basename "$KATERGON_ZIP")\") | .digest")
+          test "$digest" = "sha256:${KATERGON_SHA256}"
+
+      - name: Remove successful intake branch
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${GITHUB_REF_NAME}"
