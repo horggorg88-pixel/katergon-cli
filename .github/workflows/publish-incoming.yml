@@ -26,7 +26,7 @@ jobs:
           set -Eeuo pipefail
           node <<'NODE'
           const { createHash } = require('node:crypto');
-          const { appendFileSync, readFileSync, statSync } = require('node:fs');
+          const { appendFileSync, readFileSync, statSync, writeFileSync } = require('node:fs');
           const manifest = JSON.parse(readFileSync('incoming/manifest.json', 'utf8'));
           const keys = Object.keys(manifest).sort();
           const expectedKeys = [
@@ -52,11 +52,31 @@ jobs:
           if (actual !== manifest.sha256) throw new Error('Archive SHA-256 mismatch');
           const sidecar = readFileSync(sidecarPath, 'utf8').trim();
           if (sidecar !== `${actual}  ${manifest.zip}`) throw new Error('Sidecar mismatch');
+          const updatePath = 'incoming/katergon-cli-manifest.json';
+          const update = JSON.parse(readFileSync(updatePath, 'utf8'));
+          const updateKeys = ['artifactUrl', 'keyId', 'platform', 'schemaVersion', 'sha256', 'signature', 'sourceCommit', 'version'].sort();
+          if (JSON.stringify(Object.keys(update).sort()) !== JSON.stringify(updateKeys)) throw new Error('Unexpected update manifest fields');
+          if (update.schemaVersion !== 'katergon.signed-release/v1' || update.version !== manifest.version
+            || update.platform !== 'win-x64' || update.sha256 !== actual || update.sourceCommit !== manifest.sourceCommit
+            || update.keyId !== '52d3d44f17c2e692'
+            || update.artifactUrl !== `https://github.com/horggorg88-pixel/katergon-cli/releases/download/${manifest.tag}/${manifest.zip}`
+            || !/^[A-Za-z0-9+/=]{100,4096}$/.test(update.signature)) throw new Error('Signed update manifest mismatch');
+          const payload = JSON.stringify({ schemaVersion: update.schemaVersion, version: update.version,
+            platform: update.platform, artifactUrl: update.artifactUrl, sha256: update.sha256,
+            sourceCommit: update.sourceCommit, keyId: update.keyId });
+          const lines = update.signature.match(/.{1,70}/g) ?? [];
+          writeFileSync('incoming/katergon-update.payload', payload);
+          writeFileSync('incoming/katergon-update.sig', `-----BEGIN SSH SIGNATURE-----\n${lines.join('\n')}\n-----END SSH SIGNATURE-----\n`);
+          writeFileSync('incoming/katergon-update.allowed',
+            'katergon ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILpQkOtLcpXctCX7A5KDheLKpycYhq7NBdoQQObxxev8\n');
           appendFileSync(process.env.GITHUB_ENV,
             `KATERGON_TAG=${manifest.tag}\nKATERGON_VERSION=${manifest.version}\n` +
             `KATERGON_ZIP=${zipPath}\nKATERGON_SIDECAR=${sidecarPath}\n` +
-            `KATERGON_SHA256=${actual}\n`);
+            `KATERGON_UPDATE_MANIFEST=${updatePath}\nKATERGON_SHA256=${actual}\n`);
           NODE
+          ssh-keygen -Y verify -f incoming/katergon-update.allowed -I katergon -n katergon-release \
+            -s incoming/katergon-update.sig < incoming/katergon-update.payload
+          rm -f incoming/katergon-update.allowed incoming/katergon-update.payload incoming/katergon-update.sig
 
       - name: Publish release assets
         shell: bash
@@ -77,16 +97,18 @@ jobs:
             current=$(mktemp)
             gh release view "$KATERGON_TAG" --json assets > "$current"
             digests=$(CURRENT="$current" ZIP_NAME="$(basename "$KATERGON_ZIP")" \
-              SIDECAR_NAME="$(basename "$KATERGON_SIDECAR")" node -e \
-              "const { readFileSync } = require('node:fs'); const assets = JSON.parse(readFileSync(process.env.CURRENT, 'utf8')).assets; const digest = name => assets.find(asset => asset.name === name)?.digest ?? ''; process.stdout.write(digest(process.env.ZIP_NAME) + '|' + digest(process.env.SIDECAR_NAME));")
+              SIDECAR_NAME="$(basename "$KATERGON_SIDECAR")" MANIFEST_NAME="$(basename "$KATERGON_UPDATE_MANIFEST")" node -e \
+              "const { readFileSync } = require('node:fs'); const assets = JSON.parse(readFileSync(process.env.CURRENT, 'utf8')).assets; const digest = name => assets.find(asset => asset.name === name)?.digest ?? ''; process.stdout.write([digest(process.env.ZIP_NAME), digest(process.env.SIDECAR_NAME), digest(process.env.MANIFEST_NAME)].join('|'));")
             rm -f "$current"
-            IFS='|' read -r published_zip published_sidecar <<<"$digests"
+            IFS='|' read -r published_zip published_sidecar published_manifest <<<"$digests"
             sidecar_sha=$(sha256sum "$KATERGON_SIDECAR" | awk '{ print $1 }')
+            manifest_sha=$(sha256sum "$KATERGON_UPDATE_MANIFEST" | awk '{ print $1 }')
             test "$published_zip" = "sha256:${KATERGON_SHA256}"
             test "$published_sidecar" = "sha256:${sidecar_sha}"
+            test "$published_manifest" = "sha256:${manifest_sha}"
             printf 'Release %s is already published with the identical immutable assets.\n' "$KATERGON_TAG"
           else
-            gh release create "$KATERGON_TAG" "$KATERGON_ZIP" "$KATERGON_SIDECAR" \
+            gh release create "$KATERGON_TAG" "$KATERGON_ZIP" "$KATERGON_SIDECAR" "$KATERGON_UPDATE_MANIFEST" \
               --title "Katergon CLI ${KATERGON_VERSION}" --notes-file "$notes"
           fi
 
@@ -99,6 +121,10 @@ jobs:
           digest=$(gh release view "$KATERGON_TAG" --json assets \
             --jq ".assets[] | select(.name == \"$(basename "$KATERGON_ZIP")\") | .digest")
           test "$digest" = "sha256:${KATERGON_SHA256}"
+          manifest_digest=$(gh release view "$KATERGON_TAG" --json assets \
+            --jq ".assets[] | select(.name == \"$(basename "$KATERGON_UPDATE_MANIFEST")\") | .digest")
+          expected_manifest="sha256:$(sha256sum "$KATERGON_UPDATE_MANIFEST" | awk '{ print $1 }')"
+          test "$manifest_digest" = "$expected_manifest"
 
       - name: Remove successful intake branch
         if: success()
