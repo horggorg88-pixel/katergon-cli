@@ -6,8 +6,8 @@
 
 ## Скачать
 
-- [Katergon CLI 0.9.0 для Windows x64](https://github.com/horggorg88-pixel/katergon-cli/releases/download/v0.9.0/Katergon-CLI-0.9.0-win-x64.zip)
-- [SHA-256](https://github.com/horggorg88-pixel/katergon-cli/releases/download/v0.9.0/Katergon-CLI-0.9.0-win-x64.zip.sha256)
+- [Katergon CLI 0.9.1 для Windows x64](https://github.com/horggorg88-pixel/katergon-cli/releases/download/v0.9.1/Katergon-CLI-0.9.1-win-x64.zip)
+- [SHA-256](https://github.com/horggorg88-pixel/katergon-cli/releases/download/v0.9.1/Katergon-CLI-0.9.1-win-x64.zip.sha256)
 - [Подписанный манифест обновления](https://github.com/horggorg88-pixel/katergon-cli/releases/latest/download/katergon-cli-manifest.json)
 
 ## Установка
